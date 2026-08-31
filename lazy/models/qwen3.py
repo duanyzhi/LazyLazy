@@ -6,9 +6,11 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from lazy.config import Qwen3Config
-from lazy.cache import KVCache, create_causal_mask
+from transformers import Qwen3Config
+
+from lazy.cache import KVCache
 from lazy.layers.rotary_embedding import get_rope
+from lazy.layers.norm import RMSNorm
 
 from transformers import Qwen3Config
 
@@ -19,22 +21,6 @@ class SiLU(nn.Module):
     
     def forward(self, x):
         return nn.functional.silu(x) 
-
-class Qwen3RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps: float = 1e-6) -> None:
-        """
-        Qwen3RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
 
 class Qwen3MLP(nn.Module):
     def __init__(self, config):
@@ -125,7 +111,7 @@ class Qwen3Attention(nn.Module):
         max_position = getattr(config, "max_position_embeddings", 2048)
 
         if isinstance(rope_scaling, dict):
-            rope_theta = rope_scaling.get("rope_theta", rope_theta)
+            rope_theta = rope_scaling.get("rope_theta", 10000)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -145,8 +131,8 @@ class Qwen3Attention(nn.Module):
         self.o_proj = nn.Linear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
-        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
-        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.q_norm = RMSNorm(self.head_dim)  # unlike olmo, only on the head dim!
+        self.k_norm = RMSNorm(self.head_dim)  # thus post q_norm does not need reshape
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
     def forward(
@@ -156,6 +142,8 @@ class Qwen3Attention(nn.Module):
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
+
+        print("hidden_shape: ", hidden_shape)
 
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
@@ -179,8 +167,8 @@ class Qwen3DecoderLayer(nn.Module):
         self.self_attn = Qwen3Attention(config=config, layer_idx=layer_idx)
 
         self.mlp = Qwen3MLP(config)
-        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -193,6 +181,8 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(hidden_states, position_ids)
+
+        print("hidden_states: ", hidden_states, "residual: ", residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -209,7 +199,7 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -221,13 +211,13 @@ class Qwen3Model(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(position_ids, hidden_states, residual)
+            hidden_states, residual = layer(hidden_states=hidden_states, position_ids=position_ids, residual=residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 class Qwen3ForCausalLM(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
