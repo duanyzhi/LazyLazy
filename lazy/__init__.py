@@ -1,3 +1,4 @@
-from lazy.llm import LLM
-from lazy.sampling_params import SamplingParams
+from .utils.sampler_params import SamplingParams
+from .llm import LLM
 
+__all__ = ["LLM", "SamplingParams"]

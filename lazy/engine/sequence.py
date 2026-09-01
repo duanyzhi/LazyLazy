@@ -2,7 +2,7 @@ from copy import copy
 from enum import Enum, auto
 from itertools import count
 
-from lazy.sampling_params import SamplingParams
+from lazy import SamplingParams
 
 
 class SequenceStatus(Enum):
@@ -10,12 +10,17 @@ class SequenceStatus(Enum):
     RUNNING = auto()
     FINISHED = auto()
 
-
+"""
+Sequence represents a single request to the LLM. It contains the token ids of the prompt and the generated tokens, 
+as well as the status of the sequence (waiting, running, or finished). It also contains information about the number of tokens, 
+the number of prompt tokens, the number of cached tokens, and the number of scheduled tokens. 
+The block table is used to store the cached blocks of tokens for efficient memory management.
+"""
 class Sequence:
     block_size = 256
-    counter = count()
+    counter = count() # globla seq id
 
-    def __init__(self, token_ids: list[int], sampling_params: SamplingParams):
+    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
@@ -23,6 +28,8 @@ class Sequence:
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0
+        self.num_scheduled_tokens = 0
+        self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -33,51 +40,3 @@ class Sequence:
 
     def __getitem__(self, key):
         return self.token_ids[key]
-
-    @property
-    def is_finished(self):
-        return self.status == SequenceStatus.FINISHED
-
-    @property
-    def num_completion_tokens(self):
-        return self.num_tokens - self.num_prompt_tokens
-
-    @property
-    def prompt_token_ids(self):
-        return self.token_ids[:self.num_prompt_tokens]
-
-    @property
-    def completion_token_ids(self):
-        return self.token_ids[self.num_prompt_tokens:]
-
-    @property
-    def num_cached_blocks(self):
-        return self.num_cached_tokens // self.block_size
-
-    @property
-    def num_blocks(self):
-        return (self.num_tokens + self.block_size - 1) // self.block_size
-
-    @property
-    def last_block_num_tokens(self):
-        return self.num_tokens - (self.num_blocks - 1) * self.block_size
-
-    def block(self, i):
-        assert 0 <= i < self.num_blocks
-        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
-
-    def append_token(self, token_id: int):
-        self.token_ids.append(token_id)
-        self.last_token = token_id
-        self.num_tokens += 1
-
-    def __getstate__(self):
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
-                self.token_ids if self.num_completion_tokens == 0 else self.last_token)
-
-    def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
-        if self.num_completion_tokens == 0:
-            self.token_ids = state[-1]
-        else:
-            self.last_token = state[-1]
