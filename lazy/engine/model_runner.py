@@ -4,11 +4,13 @@ from lazy.models.qwen3 import Qwen3ForCausalLM
 from lazy.config import Config
 from lazy.utils.loader_weight import load_weights
 from lazy.engine.sequence import Sequence
+from lazy.layers.sampler import Sampler
 
 class ModelRunner:
     def __init__(self,  config : Config):
-        self.model = Qwen3ForCausalLM(config.hf_config).cuda()
+        self.model = Qwen3ForCausalLM(config.hf_config).to(dtype=torch.bfloat16).cuda()
         assert load_weights(self.model, config.model), "weight missing, please check the model path or hf name"
+        self.sampler = Sampler()
 
     def prepare_prefill(self, seqs):
         input_ids = []
@@ -25,18 +27,13 @@ class ModelRunner:
         pass
 
     def prepare_sample(self, seqs):
-        seqs_list = []
-        for seq in seqs:
-            seqs_list.extend(seq)
-        temperatures = torch.tensor(seqs_list, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        temperatures = [seq.temperature for seq in seqs]
+        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
     def run_model(self, input_ids, positions, is_prefill: bool):
         logits = self.model(input_ids, positions)
         return logits
-
-    def sampler(self, logits, temperatures):
-        pass
 
     def run(self, seqs: Sequence, is_prefill: bool):
         if is_prefill:
@@ -44,11 +41,9 @@ class ModelRunner:
         else:
             input_ids, positions = self.prepare_decode(seqs)
 
-        print("input_ids:", input_ids, "positions:", positions, "is_prefill:", is_prefill)
-
         temperatures = self.prepare_sample(seqs)
 
         logits = self.run_model(input_ids, positions, is_prefill)
 
-        # token_ids = self.sampler(logits, temperatures).tolist()
-        # return token_ids
+        token_ids = self.sampler(logits[:, -1, :], temperatures).tolist()
+        return token_ids

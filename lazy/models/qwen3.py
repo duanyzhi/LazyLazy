@@ -87,7 +87,12 @@ def eager_attention_forward(
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3))
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * module.scaling
+
+    if module.is_causal:
+        seq_len = query.shape[-2]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=query.device, dtype=torch.bool), diagonal=1)
+        attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -143,8 +148,6 @@ class Qwen3Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        print("hidden_shape: ", hidden_shape)
-
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -180,9 +183,8 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(hidden_states, position_ids)
+        hidden_states, _ = self.self_attn(hidden_states, position_ids)
 
-        print("hidden_states: ", hidden_states, "residual: ", residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -221,6 +223,8 @@ class Qwen3ForCausalLM(nn.Module):
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
 
     """
       - input_ids: [batch, seq_len], input token ids, like [101, 2054, ...]
@@ -238,9 +242,9 @@ class Qwen3ForCausalLM(nn.Module):
             position_ids=position_ids
         )
 
-        hidden_states = outputs[0]
+        hidden_states = outputs
 
         # compute logits
         logits = self.lm_head(hidden_states)
 
-        return (logits, outputs[0], outputs[1])
+        return logits

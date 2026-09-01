@@ -40,4 +40,8 @@ class LLMEngine:
         seq, is_prefill = self.scheduler.schedule()
         print(seq, is_prefill)
 
-        self.model_runner.run(seq, is_prefill)
+        out_token_id = self.model_runner.run(seq, is_prefill)
+
+        output_tokens = self.tokenizer.decode(out_token_id)
+
+        print("out token:", output_tokens)
