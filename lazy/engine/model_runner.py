@@ -1,6 +1,7 @@
 import torch
 
 from lazy.models.qwen3 import Qwen3ForCausalLM
+from lazy.cache import KVCache
 from lazy.config import Config
 from lazy.utils.loader_weight import load_weights
 from lazy.engine.sequence import Sequence
@@ -11,6 +12,7 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(config.hf_config).to(dtype=torch.bfloat16).cuda()
         assert load_weights(self.model, config.model), "weight missing, please check the model path or hf name"
         self.sampler = Sampler()
+        self.kv_cache = KVCache(config.hf_config.num_hidden_layers, device="cuda")
 
     def prepare_prefill(self, seqs):
         input_ids = []
@@ -23,17 +25,23 @@ class ModelRunner:
         positions = torch.tensor([positions], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         return input_ids, positions
 
-    def prepare_decode(self, seqs):
-        pass
+    def prepare_decode(self, seqs: list[Sequence]):
+        input_ids = []
+        positions = []
+        for seq in seqs:
+            input_ids.append(seq.last_token) # decode is get last token
+            positions.append(len(seq) - 1)
+        input_ids = torch.tensor([input_ids], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        positions = torch.tensor([positions], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        return input_ids, positions
 
     def prepare_sample(self, seqs):
         temperatures = [seq.temperature for seq in seqs]
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
-    def run_model(self, input_ids, positions, is_prefill: bool):
-        logits = self.model(input_ids, positions)
-        return logits
+    def run_model(self, input_ids, positions):
+        return self.model(input_ids, positions, kv_cache=self.kv_cache)
 
     def run(self, seqs: Sequence, is_prefill: bool):
         if is_prefill:
@@ -43,7 +51,7 @@ class ModelRunner:
 
         temperatures = self.prepare_sample(seqs)
 
-        logits = self.run_model(input_ids, positions, is_prefill)
+        logits = self.run_model(input_ids, positions)
 
         token_ids = self.sampler(logits[:, -1, :], temperatures).tolist()
         return token_ids

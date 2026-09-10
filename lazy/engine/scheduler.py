@@ -5,10 +5,11 @@ from lazy.engine.sequence import Sequence, SequenceStatus
 
 class Scheduler:
 
-    def __init__(self, config: Config):
-        
+    def __init__(self, config: Config, eos_token_id: int | None = None):
+        self.eos_token_id = eos_token_id
         self.waiting: deque[Sequence] = deque() # FIFO
         self.running: deque[Sequence] = deque()
+        self.finished: list[Sequence] = []
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -32,9 +33,19 @@ class Scheduler:
             return scheduled_seqs, True  # True for is prefill
 
         # decode
-        while self.running:
-            seq = self.running.popleft()
+        scheduled_seqs = list(self.running)
+        for seq in scheduled_seqs:
             seq.is_prefill = False
-            scheduled_seqs.append(seq)
         return scheduled_seqs, False # False for is decode
-            
+
+    def postprocess(self, seqs, output_token_ids, is_prefill):
+        for seq, token_id in zip(seqs, output_token_ids):
+            seq.append_token(token_id)
+            hit_max = seq.num_tokens - seq.num_prompt_tokens >= seq.max_tokens
+            hit_eos = (not seq.ignore_eos) and self.eos_token_id is not None and token_id == self.eos_token_id
+            if hit_max or hit_eos:
+                seq.status = SequenceStatus.FINISHED
+                self.running.remove(seq)
+                self.finished.append(seq)
+
+

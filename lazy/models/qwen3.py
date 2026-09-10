@@ -90,8 +90,11 @@ def eager_attention_forward(
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * module.scaling
 
     if module.is_causal:
-        seq_len = query.shape[-2]
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=query.device, dtype=torch.bool), diagonal=1)
+        q_len, kv_len = query.shape[-2], key_states.shape[-2]
+        # query 第 i 个位置对应整条序列的第 (kv_len - q_len + i) 个 token
+        q_pos = torch.arange(kv_len - q_len, kv_len, device=query.device).unsqueeze(1)
+        k_pos = torch.arange(kv_len, device=query.device).unsqueeze(0)
+        causal_mask = k_pos > q_pos
         attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
@@ -117,6 +120,8 @@ class Qwen3Attention(nn.Module):
 
         if isinstance(rope_scaling, dict):
             rope_theta = rope_scaling.get("rope_theta", 10000)
+        else:
+            rope_theta = getattr(config, "rope_theta", 10000)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -143,7 +148,8 @@ class Qwen3Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor):
+        positions: torch.Tensor,
+        kv_cache: "KVCache | None" = None):
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -153,6 +159,9 @@ class Qwen3Attention(nn.Module):
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         q, k = self.rotary_emb(positions, q, k)
+
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v, self.layer_idx)  # prefill: 原样存入; decode: 拼接历史
 
         attn_output, attn_weights = eager_attention_forward(
             self, q, k, v)
@@ -177,13 +186,14 @@ class Qwen3DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor | None = None,
-        residual: torch.Tensor | None = None
+        residual: torch.Tensor | None = None,
+        kv_cache: "KVCache | None" = None
     ):
         if residual is None:
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states, _ = self.self_attn(hidden_states, position_ids)
+        hidden_states, _ = self.self_attn(hidden_states, position_ids, kv_cache)
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -206,14 +216,15 @@ class Qwen3Model(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
-        position_ids: torch.LongTensor | None = None):
+        position_ids: torch.LongTensor | None = None,
+        kv_cache: "KVCache | None" = None):
         """
         past_key_values: history key/value cache. 
         """
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(hidden_states=hidden_states, position_ids=position_ids, residual=residual)
+            hidden_states, residual = layer(hidden_states=hidden_states, position_ids=position_ids, residual=residual, kv_cache=kv_cache)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -233,13 +244,15 @@ class Qwen3ForCausalLM(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
-        position_ids: torch.LongTensor | None = None
+        position_ids: torch.LongTensor | None = None,
+        kv_cache: "KVCache | None" = None
     ):
 
         # outputs: (hidden_states, past_key_values)
         outputs = self.model(
             input_ids=input_ids,
-            position_ids=position_ids
+            position_ids=position_ids,
+            kv_cache=kv_cache
         )
 
         hidden_states = outputs
