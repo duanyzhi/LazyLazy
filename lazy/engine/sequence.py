@@ -40,3 +40,8 @@ class Sequence:
 
     def __getitem__(self, key):
         return self.token_ids[key]
+
+    def append_token(self, token_id: int):
+        self.token_ids.append(token_id)
+        self.last_token = token_id
+        self.num_tokens += 1

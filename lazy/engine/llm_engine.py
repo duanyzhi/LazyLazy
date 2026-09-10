@@ -14,7 +14,10 @@ class LLMEngine:
         self.model_runner = ModelRunner(config)
 
         # do scheduler initialization
-        self.scheduler = Scheduler(config)
+        eos_token_id = config.hf_config.eos_token_id
+        if isinstance(eos_token_id, list):  # Qwen3-Base 可能是 list，取第一个
+            eos_token_id = eos_token_id[0]
+        self.scheduler = Scheduler(config, eos_token_id=eos_token_id)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
 
     def add_request(self, prompt: str | list[int], sampling_params):
@@ -29,7 +32,18 @@ class LLMEngine:
         # get scheduled sequences from scheduler
         # run model runner
         # postprocess results in scheduler
-        pass
+        seqs, is_prefill = self.scheduler.schedule()
+
+        out_token_id = self.model_runner.run(seqs, is_prefill)
+
+        # log for output tokens
+        output_tokens = self.tokenizer.decode(out_token_id)
+        print("out token:", output_tokens)
+        
+        self.scheduler.postprocess(seqs, out_token_id, is_prefill)
+
+    def is_finished(self):
+        return self.scheduler.is_finished()
 
     def generate(self, prompts, sampling_params):
         # add requests to scheduler
@@ -37,11 +51,13 @@ class LLMEngine:
         # return final outputs
         self.add_request(prompts, sampling_params)
 
-        seq, is_prefill = self.scheduler.schedule()
-        print(seq, is_prefill)
+        while not self.is_finished():
+            self.step()
 
-        out_token_id = self.model_runner.run(seq, is_prefill)
-
-        output_tokens = self.tokenizer.decode(out_token_id)
-
-        print("out token:", output_tokens)
+        outputs = []
+        for seq in self.scheduler.finished:
+            text = self.tokenizer.decode(seq.token_ids[seq.num_prompt_tokens:])
+            outputs.append(text)
+        self.model_runner.kv_cache.reset()  # 为下一次 generate 清 cache
+        self.scheduler.finished.clear()
+        return outputs
