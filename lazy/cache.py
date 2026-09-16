@@ -28,12 +28,60 @@ class KVCache:
         self._seq_len = self.layer_cache[layer_idx][0].shape[2]
         return self.layer_cache[layer_idx]
 
+    def set_layer(self, layer_idx: int, key: torch.Tensor, value: torch.Tensor):
+        self.layer_cache[layer_idx] = (key, value)
+        self._seq_len = key.shape[2]
+
     def get_seq_length(self):
         return self._seq_len
 
     def reset(self):
         self.layer_cache = [None for _ in range(self.num_layers)]
         self._seq_len = 0
+
+
+class PrefixCache:
+    """Cross-request cache for the clean prompt prefix KV of a single previous request.
+
+    MVP scope: keeps exactly one prompt prefix, matches tokens contiguously from
+    position 0, and is overwritten by the next prefill. It intentionally does not
+    keep the generated tokens, only the prompt KV produced right after prefill.
+    """
+
+    def __init__(self, num_layers: int, device=None):
+        self.num_layers = num_layers
+        self.device = device
+        self.token_ids: list[int] = []
+        self.layer_cache = [None for _ in range(num_layers)]
+
+    def match(self, token_ids: list[int]) -> int:
+        n = min(len(self.token_ids), len(token_ids))
+        i = 0
+        while i < n and self.token_ids[i] == token_ids[i]:
+            i += 1
+        return i
+
+    def load_prefix(self, kv_cache: KVCache, prefix_len: int):
+        if prefix_len <= 0:
+            return
+        for layer_idx in range(self.num_layers):
+            k, v = self.layer_cache[layer_idx]
+            kv_cache.set_layer(
+                layer_idx,
+                k[:, :, :prefix_len].clone(),
+                v[:, :, :prefix_len].clone(),
+            )
+
+    def store(self, token_ids: list[int], kv_cache: KVCache):
+        self.token_ids = list(token_ids)
+        self.layer_cache = [
+            (k.clone(), v.clone())
+            for k, v in kv_cache.layer_cache
+        ]
+
+    def clear(self):
+        self.token_ids = []
+        self.layer_cache = [None for _ in range(self.num_layers)]
 
 
 # def create_causal_mask(
