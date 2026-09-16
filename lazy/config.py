@@ -11,6 +11,14 @@ class Config:
     enforce_eager: bool = True
     hf_config: AutoConfig | None = None
 
+    # prefix cache (task 2: block-granular hash matching)
+    prefix_block_size: int = 16
+
+    # weight loading (task 2: "eager" | "three_level" | "two_level")
+    weight_loading_mode: str = "eager"
+    num_hbm_layers: int | None = None      # decoder layers kept on HBM; None = all
+    hbm_budget_bytes: int | None = None    # alternative to num_hbm_layers
+
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

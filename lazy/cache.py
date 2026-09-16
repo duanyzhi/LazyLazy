@@ -1,3 +1,5 @@
+import hashlib
+
 import torch
 
 """
@@ -40,48 +42,78 @@ class KVCache:
         self._seq_len = 0
 
 
-class PrefixCache:
-    """Cross-request cache for the clean prompt prefix KV of a single previous request.
+def hash_block(token_ids: list[int]) -> int:
+    """Stable 64-bit hash of a token block (consistent across processes).
 
-    MVP scope: keeps exactly one prompt prefix, matches tokens contiguously from
-    position 0, and is overwritten by the next prefill. It intentionally does not
-    keep the generated tokens, only the prompt KV produced right after prefill.
+    md5 keeps the key stable even across Python's per-process hash seed, which is
+    required once blocks are persisted to SSD (task 3). The raw token tuple is also
+    stored in each entry so a hash collision can never silently return wrong KV.
+    """
+    data = repr(list(token_ids)).encode("utf-8")
+    return int.from_bytes(hashlib.md5(data).digest()[:8], "little")
+
+
+class BlockPrefixCache:
+    """Block-granular, hash-matched prefix cache shared across requests.
+
+    The prompt is split into fixed-size blocks of `block_size` tokens. Each block's
+    KV (one tensor per layer) is stored under the hash of the block's token ids, so
+    matching is a dict lookup instead of a token-by-token scan, and many distinct
+    requests can each hit their own cached blocks (only the common blocks are shared).
+
+    Only full blocks participate in matching/loading. The tail partial block of a
+    prompt is always recomputed, which also guarantees at least one token is
+    recomputed even when the whole prompt is cached.
     """
 
-    def __init__(self, num_layers: int, device=None):
+    def __init__(self, num_layers: int, block_size: int = 16, device=None):
         self.num_layers = num_layers
+        self.block_size = block_size
         self.device = device
-        self.token_ids: list[int] = []
-        self.layer_cache = [None for _ in range(num_layers)]
+        self.blocks: dict[int, dict] = {}  # hash -> {"token_ids": tuple, "kv": [(k, v) per layer]}
 
     def match(self, token_ids: list[int]) -> int:
-        n = min(len(self.token_ids), len(token_ids))
-        i = 0
-        while i < n and self.token_ids[i] == token_ids[i]:
-            i += 1
-        return i
+        matched = 0
+        n = len(token_ids)
+        for start in range(0, n - n % self.block_size, self.block_size):
+            block = token_ids[start:start + self.block_size]
+            entry = self.blocks.get(hash_block(block))
+            if entry is None or entry["token_ids"] != tuple(block):
+                break
+            matched += self.block_size
+        return matched
 
-    def load_prefix(self, kv_cache: KVCache, prefix_len: int):
+    def load(self, kv_cache: KVCache, token_ids: list[int], prefix_len: int):
         if prefix_len <= 0:
             return
+        assert prefix_len % self.block_size == 0, "prefix_len must be block-aligned"
         for layer_idx in range(self.num_layers):
-            k, v = self.layer_cache[layer_idx]
-            kv_cache.set_layer(
-                layer_idx,
-                k[:, :, :prefix_len].clone(),
-                v[:, :, :prefix_len].clone(),
-            )
+            k_chunks = []
+            v_chunks = []
+            for start in range(0, prefix_len, self.block_size):
+                block = token_ids[start:start + self.block_size]
+                k, v = self.blocks[hash_block(block)]["kv"][layer_idx]
+                k_chunks.append(k.clone())
+                v_chunks.append(v.clone())
+            kv_cache.set_layer(layer_idx, torch.cat(k_chunks, dim=2), torch.cat(v_chunks, dim=2))
 
-    def store(self, token_ids: list[int], kv_cache: KVCache):
-        self.token_ids = list(token_ids)
-        self.layer_cache = [
-            (k.clone(), v.clone())
-            for k, v in kv_cache.layer_cache
-        ]
+    def store(self, token_ids: list[int], kv_cache: KVCache, num_prompt_tokens: int):
+        for start in range(0, num_prompt_tokens - num_prompt_tokens % self.block_size, self.block_size):
+            block = token_ids[start:start + self.block_size]
+            h = hash_block(block)
+            if h in self.blocks:
+                continue
+            entry = {"token_ids": tuple(block), "kv": []}
+            for layer_idx in range(self.num_layers):
+                k, v = kv_cache.layer_cache[layer_idx]
+                entry["kv"].append(
+                    (k[:, :, start:start + self.block_size].clone(),
+                     v[:, :, start:start + self.block_size].clone())
+                )
+            self.blocks[h] = entry
 
     def clear(self):
-        self.token_ids = []
-        self.layer_cache = [None for _ in range(self.num_layers)]
+        self.blocks = {}
 
 
 # def create_causal_mask(

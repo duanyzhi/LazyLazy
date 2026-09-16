@@ -35,3 +35,28 @@
   - `lazy/engine/scheduler.py`, `lazy/engine/sequence.py`
   - `lazy/models/qwen3.py` (attention 已支持 q_len != kv_len 的 causal mask)
 - 0916.md 已有明确 MVP 实现方案（直接照做）。
+
+### [STEP 1] 任务1 完成 (commit 54b4dd3)
+- 结论: prefix cache MVP 开发 + 测试通过。
+- 改动:
+  - `lazy/cache.py`: KVCache.set_layer + PrefixCache 类
+  - `lazy/engine/model_runner.py`: prepare_prefill 复用前缀、run 后 store、last_cached_len 供测试
+  - 新增 `tests/test_prefix_cache.py`、`docs/prefix_cache_mvp.md`
+- 测试结果: prompt_tokens=9 → cached1=0, cached2=8, cached3=7；llm_test.py 回归通过。
+- 关键经验: 测试里 expected3 公式应为 `min(公共前缀, prompt_len-1)`，不是 `公共前缀-1`（"留最后一个 token"规则只在整段 prompt 命中时生效）。
+
+### [STEP 2] 任务2 完成
+- 结论: KV cache 升级(hash+block+多请求) + 权重多级加载(3级/2级) 开发 + 测试通过。
+- 改动:
+  - `lazy/cache.py`: hash_block + BlockPrefixCache(替换 PrefixCache)
+  - `lazy/engine/model_runner.py`: 块对齐匹配 + WeightLoader 集成
+  - `lazy/utils/loader_weight.py`: 新增 WeightLoader(three_level/two_level)
+  - `lazy/models/qwen3.py`: forward 加 layer_loader 回调
+  - `lazy/config.py`: prefix_block_size / weight_loading_mode / num_hbm_layers / hbm_budget_bytes
+  - `lazy/engine/llm_engine.py`: 透传权重加载参数
+  - 新增 `tests/test_weight_loading.py`, 更新 `tests/test_prefix_cache.py`, `docs/task2_kv_cache_weight_loading.md`
+- 测试结果: test_prefix_cache 通过(c1=0,c2=16,c3=16,c4=16); test_weight_loading 通过(4种模式输出一致); llm_test 回归通过。
+- 关键经验: `param.data = torch.empty(..., device="meta")` 会报 "incompatible tensor type"，meta 张量不能赋给 Parameter.data；用 `torch.empty(0, dtype=param.dtype, device="cpu")` 释放存储（shape 从 safetensors 恢复）。
+- 关键数据: Qwen3-0.6B embed+norm 常驻 ≈ 311MB，单 decoder 层 ≈ 31.5MB(budget 换算用)。
+
+

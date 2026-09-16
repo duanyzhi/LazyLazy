@@ -217,13 +217,18 @@ class Qwen3Model(nn.Module):
         self,
         input_ids: torch.LongTensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        kv_cache: "KVCache | None" = None):
+        kv_cache: "KVCache | None" = None,
+        layer_loader: "Callable[[int], None] | None" = None):
         """
-        past_key_values: history key/value cache. 
+        past_key_values: history key/value cache.
+        layer_loader: optional hook called with the layer index before each decoder
+        layer runs, used by WeightLoader to page that layer's weights onto HBM.
         """
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            if layer_loader is not None:
+                layer_loader(i)
             hidden_states, residual = layer(hidden_states=hidden_states, position_ids=position_ids, residual=residual, kv_cache=kv_cache)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -245,14 +250,16 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         input_ids: torch.LongTensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        kv_cache: "KVCache | None" = None
+        kv_cache: "KVCache | None" = None,
+        layer_loader: "Callable[[int], None] | None" = None
     ):
 
         # outputs: (hidden_states, past_key_values)
         outputs = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
-            kv_cache=kv_cache
+            kv_cache=kv_cache,
+            layer_loader=layer_loader
         )
 
         hidden_states = outputs
