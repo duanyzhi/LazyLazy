@@ -6,13 +6,21 @@ from lazy.engine.sequence import Sequence
 from lazy.engine.scheduler import Scheduler
 
 class LLMEngine:
-    def __init__(self, model_path, weight_loading_mode="eager", num_hbm_layers=None, hbm_budget_bytes=None):
+    def __init__(self, model_path, weight_loading_mode="eager", num_hbm_layers=None, hbm_budget_bytes=None,
+                 prefix_block_size=16,
+                 kv_cache_hbm_budget_bytes=None, kv_cache_cpu_budget_bytes=None, kv_cache_ssd_dir=None,
+                 kv_cache_hbm_reserve_bytes=1 << 30):
         # do config initialization
         config = Config(
             model_path,
+            prefix_block_size=prefix_block_size,
             weight_loading_mode=weight_loading_mode,
             num_hbm_layers=num_hbm_layers,
             hbm_budget_bytes=hbm_budget_bytes,
+            kv_cache_hbm_budget_bytes=kv_cache_hbm_budget_bytes,
+            kv_cache_cpu_budget_bytes=kv_cache_cpu_budget_bytes,
+            kv_cache_ssd_dir=kv_cache_ssd_dir,
+            kv_cache_hbm_reserve_bytes=kv_cache_hbm_reserve_bytes,
         )
 
         # do model runner initialization

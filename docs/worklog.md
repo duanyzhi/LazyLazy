@@ -59,4 +59,15 @@
 - 关键经验: `param.data = torch.empty(..., device="meta")` 会报 "incompatible tensor type"，meta 张量不能赋给 Parameter.data；用 `torch.empty(0, dtype=param.dtype, device="cpu")` 释放存储（shape 从 safetensors 恢复）。
 - 关键数据: Qwen3-0.6B embed+norm 常驻 ≈ 311MB，单 decoder 层 ≈ 31.5MB(budget 换算用)。
 
+### [STEP 3] 任务3 完成
+- 结论: KV cache manager SSD->CPU->HBM 多级加载 开发 + 测试通过。
+- 改动:
+  - 新增 `lazy/cache_manager.py`: KVCacheManager(BlockPrefixCache) 三级存储 + LRU 换入换出
+  - `lazy/engine/model_runner.py`: prefix_cache 换成 KVCacheManager
+  - `lazy/config.py` / `lazy/engine/llm_engine.py`: 新增 kv_cache_* 与 prefix_block_size 参数
+  - 新增 `tests/test_kv_cache_manager.py`, `docs/task3_kv_cache_manager.md`
+- 测试结果: 自动预算>0; run1 tiers={hbm:1,cpu:1,ssd:5}; c1=0,c2=28,c3=16,c4=28; 全量回归通过。
+- 关键数据: Qwen3-0.6B block=4 时每块 458752 字节。
+
+
 

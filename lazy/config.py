@@ -19,6 +19,12 @@ class Config:
     num_hbm_layers: int | None = None      # decoder layers kept on HBM; None = all
     hbm_budget_bytes: int | None = None    # alternative to num_hbm_layers
 
+    # kv cache manager (task 3: SSD -> CPU -> HBM tiering)
+    kv_cache_hbm_budget_bytes: int | None = None    # None = auto from free HBM
+    kv_cache_cpu_budget_bytes: int | None = None    # None = unlimited CPU tier
+    kv_cache_ssd_dir: str | None = None
+    kv_cache_hbm_reserve_bytes: int = 1 << 30       # reserved HBM when auto-sizing
+
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

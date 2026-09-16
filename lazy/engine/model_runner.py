@@ -1,7 +1,8 @@
 import torch
 
 from lazy.models.qwen3 import Qwen3ForCausalLM
-from lazy.cache import KVCache, BlockPrefixCache
+from lazy.cache import KVCache
+from lazy.cache_manager import KVCacheManager
 from lazy.config import Config
 from lazy.utils.loader_weight import load_weights, WeightLoader
 from lazy.engine.sequence import Sequence
@@ -23,10 +24,14 @@ class ModelRunner:
             )
         self.sampler = Sampler()
         self.kv_cache = KVCache(config.hf_config.num_hidden_layers, device="cuda")
-        self.prefix_cache = BlockPrefixCache(
+        self.prefix_cache = KVCacheManager(
             config.hf_config.num_hidden_layers,
             block_size=config.prefix_block_size,
             device="cuda",
+            hbm_budget_bytes=config.kv_cache_hbm_budget_bytes,
+            cpu_budget_bytes=config.kv_cache_cpu_budget_bytes,
+            ssd_dir=config.kv_cache_ssd_dir,
+            hbm_reserve_bytes=config.kv_cache_hbm_reserve_bytes,
         )
         self.last_cached_len = 0
 
