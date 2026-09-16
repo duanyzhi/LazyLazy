@@ -69,5 +69,22 @@
 - 测试结果: 自动预算>0; run1 tiers={hbm:1,cpu:1,ssd:5}; c1=0,c2=28,c3=16,c4=28; 全量回归通过。
 - 关键数据: Qwen3-0.6B block=4 时每块 458752 字节。
 
+### [STEP 4] 任务4 完成 (Mosaic 结合)
+- 结论: 已读 Mosaic-0916.pdf(15页)，输出结合方案并完成最小忠实改动 + 收益测试。
+- 核心判断: LazyLazy `KVCacheManager._find_lru_tier` 正是论文批评的 component-local 纯 LRU；
+  最小结合点 = 给 KV cache 加 AMS 程序状态 + liveness-anchored eviction（论文 §6.1.2）。
+- 改动:
+  - `lazy/cache_manager.py`: 新增 `eviction_policy`("lru"/"liveness")、`begin_program`/`suspend`/
+    `terminate`/`ref_count`、`store(..., program_id=...)`；`_find_lru_tier` 在 liveness 下按存活
+    引用数逐出(Running 不逐, Dead 先逐, LRU 同层 tie-break)。无程序状态时退化为纯 LRU，与任务1-3兼容。
+  - 新增 `tests/test_mosaic_eviction.py`、`docs/task4_mosaic.md`
+- 收益(前后对比): block=4, HBM=2程序量, CPU=0。A(存活)/B(死)/C(新) 场景:
+  - lru: A 的 4 块全被逐到 SSD，恢复 load 42.94ms
+  - liveness: A 的 4 块全留 HBM(0 落 SSD)，先逐 B 死块，恢复 load 2.88ms (~15× 加速)
+  - 两者恢复出的 KV 与新鲜 prefill 逐位一致(torch.equal)。
+- 测试结果: test_mosaic_eviction PASS; test_prefix_cache / test_weight_loading /
+  test_kv_cache_manager / llm_test 全量回归通过。
+- 范围外: cache-affinity 调度/准入控制、γ(p) 保护期衰减、GMM 跨对象分配、shared-data partition ranking。
+
 
 

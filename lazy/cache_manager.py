@@ -17,14 +17,24 @@ class KVCacheManager(BlockPrefixCache):
     HBM residency is bounded by `hbm_budget_bytes`. When it is None the budget is
     derived from the currently free HBM (`torch.cuda.mem_get_info`) minus
     `hbm_reserve_bytes`, i.e. the cache is sized by the remaining buffer. Blocks are
-    evicted HBM -> CPU and (when `cpu_budget_bytes` is set) CPU -> SSD in LRU order.
-    On a hit, a block is pulled back up the tiers (SSD -> CPU -> HBM) before use, so
-    a repeated request can be served straight from SSD.
+    evicted HBM -> CPU and (when `cpu_budget_bytes` is set) CPU -> SSD. On a hit, a
+    block is pulled back up the tiers (SSD -> CPU -> HBM) before use, so a repeated
+    request can be served straight from SSD.
+
+    Eviction order is controlled by `eviction_policy`:
+      - "lru": pure LRU (the component-local policy Mosaic identifies as the root of
+        the attribution mismatch for agent programs).
+      - "liveness": Mosaic-style liveness-anchored eviction. Each block tracks the
+        programs that used it via `store(..., program_id=...)`, `suspend`, and
+        `terminate`. Blocks with a running program are never evicted; the rest are
+        evicted by increasing live-program reference count, with LRU as the
+        intra-tier tie-breaker. Without any program state every block has zero
+        references, so this degenerates to plain LRU.
     """
 
     def __init__(self, num_layers, block_size=16, device="cuda",
                  hbm_budget_bytes=None, cpu_budget_bytes=None, ssd_dir=None,
-                 hbm_reserve_bytes=1 << 30):
+                 hbm_reserve_bytes=1 << 30, eviction_policy="liveness"):
         super().__init__(num_layers, block_size=block_size, device=device)
         self.ssd_dir = ssd_dir or "/tmp/lazy_kv_cache"
         os.makedirs(self.ssd_dir, exist_ok=True)
@@ -32,6 +42,10 @@ class KVCacheManager(BlockPrefixCache):
         self.hbm_bytes = 0
         self.cpu_bytes = 0
         self.cpu_budget_bytes = cpu_budget_bytes  # None = unlimited
+        self.eviction_policy = eviction_policy  # "lru" | "liveness"
+        # Mosaic AMS program state: block hash -> {program_id: "running"|"suspended"}
+        self.block_progs = {}
+        self.prog_blocks = {}  # program_id -> set(block hash)
         if hbm_budget_bytes is not None:
             self.hbm_budget_bytes = hbm_budget_bytes
         else:
@@ -41,6 +55,39 @@ class KVCacheManager(BlockPrefixCache):
     @staticmethod
     def _kv_bytes(kv):
         return sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
+
+    # -- Mosaic AMS program state -------------------------------------------------
+    def begin_program(self, program_id):
+        """Register a live agent program (no-op if already tracked)."""
+        if program_id is None:
+            return
+        self.prog_blocks.setdefault(program_id, set())
+
+    def _mark_running(self, h, program_id):
+        self.begin_program(program_id)
+        self.block_progs.setdefault(h, {})[program_id] = "running"
+        self.prog_blocks[program_id].add(h)
+
+    def suspend(self, program_id):
+        """Running -> Suspended: the program's LLM invocation finished but the
+        program is still live and may reuse its blocks on a later turn."""
+        for h in self.prog_blocks.get(program_id, ()):
+            progs = self.block_progs.get(h)
+            if progs is not None and progs.get(program_id) == "running":
+                progs[program_id] = "suspended"
+
+    def terminate(self, program_id):
+        """Running/Suspended -> Dead: drop all state entries for the program."""
+        for h in self.prog_blocks.pop(program_id, ()):
+            progs = self.block_progs.get(h)
+            if progs is not None:
+                progs.pop(program_id, None)
+                if not progs:
+                    self.block_progs.pop(h, None)
+
+    def ref_count(self, h):
+        """Number of live (running or suspended) programs referencing a block."""
+        return len(self.block_progs.get(h, {}))
 
     def _ensure_hbm(self, h):
         entry = self.blocks[h]
@@ -75,6 +122,21 @@ class KVCacheManager(BlockPrefixCache):
             entry["file"] = file
 
     def _find_lru_tier(self, tier):
+        if self.eviction_policy == "liveness":
+            victim = None
+            victim_refs = None
+            for h in self.lru:  # oldest first
+                if self.blocks[h]["tier"] != tier:
+                    continue
+                progs = self.block_progs.get(h, {})
+                if any(s == "running" for s in progs.values()):
+                    continue  # never evict a block an invocation is using
+                refs = len(progs)
+                if victim is None or refs < victim_refs:
+                    victim, victim_refs = h, refs
+                    if refs == 0:
+                        break  # oldest zero-reference block, nothing better
+            return victim
         for h in self.lru:
             if self.blocks[h]["tier"] == tier:
                 return h
@@ -110,10 +172,12 @@ class KVCacheManager(BlockPrefixCache):
             kv_cache.set_layer(layer_idx, torch.cat(k_chunks, dim=2), torch.cat(v_chunks, dim=2))
         self._enforce_budgets()
 
-    def store(self, token_ids, kv_cache, num_prompt_tokens):
+    def store(self, token_ids, kv_cache, num_prompt_tokens, program_id=None):
         for start in range(0, num_prompt_tokens - num_prompt_tokens % self.block_size, self.block_size):
             block = token_ids[start:start + self.block_size]
             h = hash_block(block)
+            if program_id is not None:
+                self._mark_running(h, program_id)
             if h in self.blocks:
                 self.lru.move_to_end(h)
                 continue
@@ -132,6 +196,8 @@ class KVCacheManager(BlockPrefixCache):
     def clear(self):
         self.blocks = {}
         self.lru.clear()
+        self.block_progs = {}
+        self.prog_blocks = {}
         self.hbm_bytes = 0
         self.cpu_bytes = 0
 
