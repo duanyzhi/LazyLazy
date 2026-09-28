@@ -7,6 +7,10 @@ import torch.nn as nn
 from torch import Tensor
 
 from lazy.config import Qwen3MoeConfig
+from lazy.utils.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class SiLU(nn.Module):
     def __init__(self):
@@ -204,7 +208,7 @@ class Qwen3MoeRotaryEmbedding(nn.Module):
 
         self.rope_type = self.config.rope_parameters["rope_type"]
         rope_init_fn: Callable = self.compute_default_rope_parameters
-        # print("rope type:", self.rope_type)
+        logger.debug("rope type: %s", self.rope_type)
         # if self.rope_type != "default":
         #     rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
         inv_freq, self.attention_scaling = rope_init_fn(self.config, device)

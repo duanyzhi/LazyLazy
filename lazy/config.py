@@ -3,6 +3,11 @@ from dataclasses import dataclass
 
 from transformers import AutoConfig
 
+from lazy.utils.logger import init_logger
+
+logger = init_logger(__name__)
+
+
 @dataclass(slots=True)
 class Config:
     model: str  # model path or hf name
@@ -15,5 +20,5 @@ class Config:
     def __post_init__(self):
         assert os.path.isdir(self.model)
         self.hf_config = AutoConfig.from_pretrained(self.model)
-        print(f"Loaded config from {self.model}: {self.hf_config}")
+        logger.debug("loaded config from %s: %s", self.model, self.hf_config)
         

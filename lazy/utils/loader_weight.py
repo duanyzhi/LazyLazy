@@ -3,14 +3,17 @@ import glob
 
 from safetensors import safe_open
 
+from lazy.utils.logger import init_logger
+
+logger = init_logger(__name__)
+
+
 def load_weights(module, model_path: str):
     """Load safetensors into module parameters with exact name matching.
 
     This is the simplest one-to-one approach: each tensor name in the safetensors
     files must match a parameter name in module.state_dict().
     """
-    print("module: ", module, "\nmodel_path: ", model_path)
-
     state_dict = module.state_dict()
     matched = []
     missing = []
@@ -33,13 +36,12 @@ def load_weights(module, model_path: str):
 
                 param.data.copy_(tensor.to(device=param.device, dtype=param.dtype))
                 matched.append(weight_name)
-                # print(f"loaded: {weight_name} -> {file}")
+                logger.debug("loaded: %s -> %s", weight_name, file)
 
-    print(f"matched {len(matched)} tensors")
+    logger.info("matched %d tensors from %s", len(matched), model_path)
     if missing:
-        print("not matched:")
+        logger.warning("%d tensors not matched:", len(missing))
         for name, file in missing[:10]:
-            print(f"  {name} from {file}")
+            logger.warning("  %s from %s", name, file)
 
     return matched
-

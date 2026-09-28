@@ -4,15 +4,22 @@ from lazy.models.qwen3 import Qwen3ForCausalLM
 from lazy.cache import KVCache
 from lazy.config import Config
 from lazy.utils.loader_weight import load_weights
+from lazy.utils.logger import init_logger
 from lazy.engine.sequence import Sequence
 from lazy.layers.sampler import Sampler
 
+logger = init_logger(__name__)
+
+
 class ModelRunner:
     def __init__(self,  config : Config):
+        logger.info("building model on cuda (bf16)")
         self.model = Qwen3ForCausalLM(config.hf_config).to(dtype=torch.bfloat16).cuda()
+        logger.info("loading weights from %s", config.model)
         assert load_weights(self.model, config.model), "weight missing, please check the model path or hf name"
         self.sampler = Sampler()
         self.kv_cache = KVCache(config.hf_config.num_hidden_layers, device="cuda")
+        logger.info("model runner ready")
 
     def prepare_prefill(self, seqs):
         input_ids = []
@@ -46,8 +53,10 @@ class ModelRunner:
     def run(self, seqs: Sequence, is_prefill: bool):
         if is_prefill:
             input_ids, positions = self.prepare_prefill(seqs)
+            logger.debug("prefill: %d seqs, %d tokens", len(seqs), input_ids.shape[1])
         else:
             input_ids, positions = self.prepare_decode(seqs)
+            logger.debug("decode: %d seqs", len(seqs))
 
         temperatures = self.prepare_sample(seqs)
 

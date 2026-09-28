@@ -2,6 +2,10 @@ from collections import deque
 
 from lazy.config import Config
 from lazy.engine.sequence import Sequence, SequenceStatus
+from lazy.utils.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class Scheduler:
 
@@ -47,5 +51,7 @@ class Scheduler:
                 seq.status = SequenceStatus.FINISHED
                 self.running.remove(seq)
                 self.finished.append(seq)
-
+                reason = "hit_max" if hit_max else "hit_eos"
+                logger.info("seq %d finished (%s), generated %d tokens",
+                            seq.seq_id, reason, seq.num_tokens - seq.num_prompt_tokens)
 
