@@ -18,7 +18,8 @@ class ModelRunner:
         logger.info("loading weights from %s", config.model)
         assert load_weights(self.model, config.model), "weight missing, please check the model path or hf name"
         self.sampler = Sampler()
-        self.kv_cache = KVCache(config.hf_config.num_hidden_layers, device="cuda")
+        self.num_layers = config.hf_config.num_hidden_layers
+        self.kv_caches: dict[int, KVCache] = {}  # seq_id -> 每个请求独立的 KV cache
         logger.info("model runner ready")
 
     def prepare_prefill(self, seqs):
@@ -47,20 +48,24 @@ class ModelRunner:
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
-    def run_model(self, input_ids, positions):
-        return self.model(input_ids, positions, kv_cache=self.kv_cache)
+    def run_model(self, input_ids, positions, kv_cache):
+        return self.model(input_ids, positions, kv_cache=kv_cache)
 
-    def run(self, seqs: Sequence, is_prefill: bool):
+    def free_cache(self, seq_id: int):
+        self.kv_caches.pop(seq_id, None)
+
+    def _run_seq(self, seq: Sequence, is_prefill: bool):
         if is_prefill:
-            input_ids, positions = self.prepare_prefill(seqs)
-            logger.debug("prefill: %d seqs, %d tokens", len(seqs), input_ids.shape[1])
+            self.kv_caches[seq.seq_id] = KVCache(self.num_layers, device="cuda")
+            input_ids, positions = self.prepare_prefill([seq])
+            logger.debug("prefill: seq %d, %d tokens", seq.seq_id, input_ids.shape[1])
         else:
-            input_ids, positions = self.prepare_decode(seqs)
+            input_ids, positions = self.prepare_decode([seq])
+        temperatures = self.prepare_sample([seq])
+        logits = self.run_model(input_ids, positions, self.kv_caches[seq.seq_id])
+        return self.sampler(logits[:, -1, :], temperatures).item()
+
+    def run(self, seqs: list[Sequence], is_prefill: bool):
+        if not is_prefill:
             logger.debug("decode: %d seqs", len(seqs))
-
-        temperatures = self.prepare_sample(seqs)
-
-        logits = self.run_model(input_ids, positions)
-
-        token_ids = self.sampler(logits[:, -1, :], temperatures).tolist()
-        return token_ids
+        return [self._run_seq(seq, is_prefill) for seq in seqs]

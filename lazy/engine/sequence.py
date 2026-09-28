@@ -34,6 +34,7 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.finish_reason: str | None = None  # hit_max / hit_eos，完成时由 scheduler 写入
 
     def __len__(self):
         return self.num_tokens

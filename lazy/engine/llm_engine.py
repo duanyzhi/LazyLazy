@@ -49,29 +49,34 @@ class LLMEngine:
         logger.debug("step: %d seqs, is_prefill=%s, out token: %s",
                      len(seqs), is_prefill, self.tokenizer.decode(out_token_id))
 
-        self.scheduler.postprocess(seqs, out_token_id, is_prefill)
+        finished = self.scheduler.postprocess(seqs, out_token_id, is_prefill)
+        for seq in finished:
+            self.model_runner.free_cache(seq.seq_id)
 
     def is_finished(self):
         return self.scheduler.is_finished()
 
-    def generate(self, prompts, sampling_params):
+    def generate(self, prompts: str | list[str], sampling_params):
         # add requests to scheduler
         # loop until all sequences are finished
         # return final outputs
-        self.add_request(prompts, sampling_params)
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        for prompt in prompts:
+            self.add_request(prompt, sampling_params)
         start_time = time.perf_counter()
 
         while not self.is_finished():
             self.step()
 
         outputs = []
-        for seq in self.scheduler.finished:
+        for seq in sorted(self.scheduler.finished, key=lambda seq: seq.seq_id):
             text = self.tokenizer.decode(seq.token_ids[seq.num_prompt_tokens:])
             outputs.append(text)
             num_new_tokens = seq.num_tokens - seq.num_prompt_tokens
             elapsed = time.perf_counter() - start_time
             logger.info("generate done: seq %d, %d tokens in %.2fs (%.2f tok/s)",
                         seq.seq_id, num_new_tokens, elapsed, num_new_tokens / max(elapsed, 1e-9))
-        self.model_runner.kv_cache.reset()  # 为下一次 generate 清 cache
+        self.model_runner.kv_caches.clear()  # 兜底：正常路径在 step 里已按 seq 释放
         self.scheduler.finished.clear()
         return outputs
