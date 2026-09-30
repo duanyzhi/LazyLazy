@@ -1,4 +1,7 @@
+"""旋转位置编码（RoPE）。"""
+
 from functools import lru_cache
+
 import torch
 from torch import nn
 
@@ -8,6 +11,7 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
+    """把 RoPE 的 cos/sin 作用到张量上。"""
     x1, x2 = torch.chunk(x.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
@@ -15,6 +19,7 @@ def apply_rotary_emb(
 
 
 class RotaryEmbedding(nn.Module):
+    """预计算 cos/sin 缓存，按 position 取用。"""
 
     def __init__(
         self,
@@ -26,7 +31,8 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.head_size = head_size
         assert rotary_dim == head_size
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (base**(
+            torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -40,6 +46,7 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """给 query 和 key 加上 rotary 位置编码。"""
         cos_sin = self.cos_sin_cache[positions]
         if query.ndim == 4 and cos_sin.ndim == 4:
             cos_sin = cos_sin.squeeze(-2).unsqueeze(1)
@@ -55,6 +62,6 @@ def get_rope(
     rotary_dim: int,
     max_position: int,
     base: float,
-):
-    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
-    return rotary_emb
+) -> RotaryEmbedding:
+    """按参数构造（并缓存）一个 RotaryEmbedding。"""
+    return RotaryEmbedding(head_size, rotary_dim, max_position, base)

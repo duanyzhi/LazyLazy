@@ -15,3 +15,11 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lazy*"]
+
+[tool.yapf]
+based_on_style = "google"
+column_limit = 80
+
+[tool.isort]
+profile = "google"
+line_length = 80

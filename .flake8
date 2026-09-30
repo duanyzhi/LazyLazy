@@ -1,0 +1,7 @@
+[flake8]
+max-line-length = 80
+extend-ignore = E203,W503,W504
+exclude = .git,__pycache__,build,dist,*.egg-info
+# qwen3_moe.py 是从 HF 拷来的半成品，引用了若干没定义的名字，见文件头说明。
+per-file-ignores =
+    lazy/models/qwen3_moe.py:F821

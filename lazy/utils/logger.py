@@ -1,3 +1,9 @@
+"""统一的日志配置。
+
+每个模块用 init_logger(__name__) 拿 logger，都挂到 "lazy" 根 logger 下，
+级别由环境变量 LAZY_LOG_LEVEL 控制。
+"""
+
 import logging
 import os
 import sys
@@ -5,11 +11,12 @@ import sys
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-_handler = None
-_level = logging.INFO
+_handler: logging.Handler | None = None
+_level: str | int = logging.INFO
 
 
-def _get_handler():
+def _get_handler() -> logging.Handler:
+    """拿到全局唯一的 stream handler，第一次调用时创建。"""
     global _handler, _level
     if _handler is not None:
         return _handler
@@ -24,14 +31,20 @@ def _get_handler():
 
 
 def init_logger(name: str) -> logging.Logger:
-    """每个模块用 init_logger(__name__) 拿 logger，统一挂到 "lazy" 根 logger 下。
+    """按模块名拿一个挂好 handler 的 logger。
 
-    日志级别用环境变量 LAZY_LOG_LEVEL 控制，默认 INFO。
+    包外调用方（比如测试脚本的 __main__）不在 "lazy" 命名空间下，这里直接
+    给它挂上 handler，免得日志丢失。
+
+    Args:
+        name: 模块名，通常传 __name__。
+
+    Returns:
+        配置好的 logger。
     """
     handler = _get_handler()
     logger = logging.getLogger(name)
     if not name.startswith("lazy"):
-        # 包外调用方（如测试脚本的 __main__）不在 "lazy" 命名空间下，直接挂 handler
         if handler not in logger.handlers:
             logger.addHandler(handler)
         logger.setLevel(_level)
