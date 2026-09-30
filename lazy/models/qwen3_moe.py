@@ -1,10 +1,7 @@
-import functools
-import math
 from collections.abc import Callable
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 
 from lazy.config import Qwen3MoeConfig
 from lazy.utils.logger import init_logger
@@ -13,14 +10,14 @@ logger = init_logger(__name__)
 
 
 class SiLU(nn.Module):
-    def __init__(self):
-        super().__init__()
-        pass
-    
-    def forward(self, x):
-        return nn.functional.silu(x) 
+    """SiLU 激活函数。"""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return nn.functional.silu(x)
+
 
 class Qwen3MoeRMSNorm(nn.Module):
+
     def __init__(self, hidden_size, eps: float = 1e-6) -> None:
         """
         Qwen3MoeRMSNorm is equivalent to T5LayerNorm
@@ -33,48 +30,56 @@ class Qwen3MoeRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * torch.rsqrt(variance +
+                                                    self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """把 KV 头复制 n_rep 份，对齐 query 的头数。
+
+    等价于 torch.repeat_interleave(x, dim=1, repeats=n_rep)，把形状从
+    (batch, num_key_value_heads, seqlen, head_dim) 变成
+    (batch, num_attention_heads, seqlen, head_dim)。
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :,
+                                  None, :, :].expand(batch, num_key_value_heads,
+                                                     n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen,
+                                 head_dim)
 
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """把最后一维对半切开再换位，RoPE 用。"""
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
-# Adapted from transformers.models.glm.modular_glm.apply_rotary_pos_emb
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
 
-    Removes the interleaving of cos and sin from GLM
+# Adapted from transformers.models.glm.modular_glm.apply_rotary_pos_emb
+def apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """给 query 和 key 加 rotary 位置编码（照搬 GLM 版本）。
+
+    和 Qwen3 版本的区别是这里保留了没旋转的那半维。
 
     Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+        q: query 张量。
+        k: key 张量。
+        cos: rotary 的 cos 部分。
+        sin: rotary 的 sin 部分。
+        unsqueeze_dim: 给 cos/sin 插入的维度，默认 1。
+
     Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+        加了位置编码的 (query, key)。
     """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
@@ -93,15 +98,14 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     k_embed = torch.cat([k_embed, k_pass], dim=-1)
     return q_embed, k_embed
 
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    scaling: float,
-    dropout: float = 0.0
-):
+
+def eager_attention_forward(module: nn.Module,
+                            query: torch.Tensor,
+                            key: torch.Tensor,
+                            value: torch.Tensor,
+                            attention_mask: torch.Tensor | None,
+                            scaling: float,
+                            dropout: float = 0.0):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
@@ -109,28 +113,43 @@ def eager_attention_forward(
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_weights = nn.functional.softmax(attn_weights,
+                                         dim=-1,
+                                         dtype=torch.float32).to(query.dtype)
+    # attn_weights = nn.functional.dropout(
+    #     attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, attn_weights
 
+
 class Qwen3MoeMLP(nn.Module):
+
     def __init__(self, config, intermediate_size=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        if intermediate_size is None:
+            intermediate_size = config.intermediate_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size,
+                                   self.intermediate_size,
+                                   bias=False)
+        self.up_proj = nn.Linear(self.hidden_size,
+                                 self.intermediate_size,
+                                 bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size,
+                                   self.hidden_size,
+                                   bias=False)
         self.act_fn = SiLU()
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_proj = self.down_proj(
+            self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
-    
+
+
 class Qwen3MoeAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -138,26 +157,33 @@ class Qwen3MoeAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.head_dim = getattr(
+            config, "head_dim",
+            config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = (config.num_attention_heads //
+                                     config.num_key_value_heads)
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
-        )
-        self.q_norm = Qwen3MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
-        self.k_norm = Qwen3MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.q_proj = nn.Linear(config.hidden_size,
+                                config.num_attention_heads * self.head_dim,
+                                bias=config.attention_bias)
+        self.k_proj = nn.Linear(config.hidden_size,
+                                config.num_key_value_heads * self.head_dim,
+                                bias=config.attention_bias)
+        self.v_proj = nn.Linear(config.hidden_size,
+                                config.num_key_value_heads * self.head_dim,
+                                bias=config.attention_bias)
+        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim,
+                                config.hidden_size,
+                                bias=config.attention_bias)
+        self.q_norm = Qwen3MoeRMSNorm(
+            self.head_dim,
+            eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
+        self.k_norm = Qwen3MoeRMSNorm(
+            self.head_dim,
+            eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
         self.sliding_window = getattr(config, "sliding_window", None)
 
     def forward(
@@ -171,16 +197,20 @@ class Qwen3MoeAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_norm(
+            self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(
+            self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(
+            1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(query_states,
+                                                        key_states, cos, sin)
 
         # if past_key_values is not None:
-        #     key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
-
+        #     key_states, value_states = past_key_values.update(
+        #         key_states, value_states, self.layer_idx)
 
         attn_output, attn_weights = eager_attention_forward(
             self,
@@ -198,7 +228,9 @@ class Qwen3MoeAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+
 class Qwen3MoeRotaryEmbedding(nn.Module):
+
     def __init__(self, config: Qwen3MoeConfig, device=None):
         super().__init__()
         self.max_seq_len_cached = config.max_position_embeddings
@@ -216,33 +248,36 @@ class Qwen3MoeRotaryEmbedding(nn.Module):
         self.inv_freq = nn.Buffer(inv_freq, persistent=False)
         self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
 
-    def compute_default_rope_parameters(config: Qwen3MoeConfig, device=None, **kwargs) -> tuple[torch.Tensor, float]:
-        """
-        Computes the inverse frequencies according to the original RoPE implementation
+    def compute_default_rope_parameters(config: Qwen3MoeConfig,
+                                        device=None,
+                                        **kwargs) -> tuple[torch.Tensor, float]:
+        """按原始 RoPE 实现算 inverse frequencies。
+
         Args:
-            config ([`~transformers.PreTrainedConfig`]):
-                The model configuration.
+            config: 模型配置。
+
         Returns:
-            Tuple of (`torch.Tensor`, `float`), containing the inverse frequencies for the RoPE embeddings and the
-            post-processing scaling factor applied to the computed cos/sin (unused in this type of RoPE).
+            (inverse frequencies, cos/sin 的缩放系数)，缩放系数在这个
+            RoPE 类型里用不到。
         """
         base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = getattr(config, "head_dim",
+                      None) or config.hidden_size // config.num_attention_heads
 
         attention_factor = 1.0  # Unused in this type of RoPE
         # Compute the inverse frequencies
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        exponent = torch.arange(0, dim, 2, dtype=torch.float) / dim
+        inv_freq = 1.0 / (base**exponent)
         return inv_freq.to(device), attention_factor
 
     def forward(self, x, position_ids):
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1).to(dtype=torch.float, device=x.device)
-        )
+        inv_freq_expanded = (self.inv_freq[None, :,
+                                           None].expand(position_ids.shape[0],
+                                                        -1,
+                                                        1).to(dtype=torch.float,
+                                                              device=x.device))
         position_ids_expanded = position_ids[:, None, :].float()
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        # Disable any outside autocast context if any, to really force fp32
-        # with maybe_autocast(device_type=device_type, enabled=False):
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.attention_scaling
@@ -250,7 +285,9 @@ class Qwen3MoeRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
+
 class Qwen3MoeSparseMoeBlock(nn.Module):
+
     def __init__(self, config: Qwen3MoeConfig):
         super().__init__()
         self.experts = Qwen3MoeExperts(config)
@@ -260,22 +297,29 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
         _, routing_weights, selected_experts = self.gate(hidden_states_reshaped)
-        final_hidden_states = self.experts(hidden_states_reshaped, selected_experts, routing_weights)
-        return final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        final_hidden_states = self.experts(hidden_states_reshaped,
+                                           selected_experts, routing_weights)
+        return final_hidden_states.reshape(batch_size, sequence_length,
+                                           hidden_dim)
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
+
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
         super().__init__()
         self.self_attn = Qwen3MoeAttention(config, layer_idx)
-        if (layer_idx not in config.mlp_only_layers) and (
-            config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
-        ):
+        is_sparse = (layer_idx not in config.mlp_only_layers and
+                     config.num_experts > 0 and
+                     (layer_idx + 1) % config.decoder_sparse_step == 0)
+        if is_sparse:
             self.mlp = Qwen3MoeSparseMoeBlock(config)
         else:
-            self.mlp = Qwen3MoeMLP(config, intermediate_size=config.intermediate_size)
-        self.input_layernorm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.mlp = Qwen3MoeMLP(config,
+                                   intermediate_size=config.intermediate_size)
+        self.input_layernorm = Qwen3MoeRMSNorm(config.hidden_size,
+                                               eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3MoeRMSNorm(config.hidden_size,
+                                                        eps=config.rms_norm_eps)
         self.hidden_size = config.hidden_size
 
     def forward(
